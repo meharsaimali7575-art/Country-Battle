@@ -12,6 +12,7 @@ permissions:
 
 jobs:
   build:
+    name: Build ARM64 APK
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
@@ -23,7 +24,7 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Install Utilities
+      - name: Install Build Utilities
         run: |
           sudo apt-get update
           sudo apt-get install -y unzip jq curl binutils
@@ -36,7 +37,7 @@ jobs:
           ZIP_FILE=$(find . -maxdepth 1 -type f -iname "*.zip" | head -n 1)
 
           if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: Project ZIP not found."
+            echo "ERROR: Project ZIP not found in repository root."
             exit 1
           fi
 
@@ -53,7 +54,7 @@ jobs:
           PROJECT_DIR="$(cd "$(dirname "$SETTINGS_FILE")" && pwd)"
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "Project found: $PROJECT_DIR"
+          echo "Project directory: $PROJECT_DIR"
 
       - name: Check Project Files
         shell: bash
@@ -67,6 +68,9 @@ jobs:
             "gradle.properties"
             "app/build.gradle"
             "app/CMakeLists.txt"
+            "app/src/main/AndroidManifest.xml"
+            "app/src/main/java/com/countrybattle/mobile/MainActivity.java"
+            "app/src/main/cpp/native-lib.cpp"
             "scripts/setup-node-mobile.sh"
             "scripts/setup-node-deps.sh"
             "app/src/main/assets/nodejs-project/package.json"
@@ -83,7 +87,7 @@ jobs:
             fi
           done
 
-          echo "All project files found."
+          echo "All required project files found."
 
       - name: Set Up Java
         uses: actions/setup-java@v4
@@ -96,18 +100,11 @@ jobs:
         run: |
           set -e
 
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          echo "ANDROID_SDK_ROOT=$ANDROID_HOME"
+          SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -name sdkmanager -type f | head -n 1)
 
-          if [ ! -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
-            SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -name sdkmanager -type f | head -n 1)
-
-            if [ -z "$SDKMANAGER" ]; then
-              echo "ERROR: sdkmanager not found."
-              exit 1
-            fi
-          else
-            SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ -z "$SDKMANAGER" ]; then
+            echo "ERROR: Android sdkmanager not found."
+            exit 1
           fi
 
           yes | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --licenses || true
@@ -135,23 +132,51 @@ jobs:
       - name: Install ARM64 Node.js Mobile Runtime
         shell: bash
         run: |
+          set -e
           cd "$PROJECT_DIR"
+
           bash scripts/setup-node-mobile.sh
+
+          test -s app/libnode/bin/arm64-v8a/libnode.so
+          test -s app/libnode/include/node/node.h
+
+          readelf -h app/libnode/bin/arm64-v8a/libnode.so | grep "AArch64"
+
+      - name: Fix Duplicate C++ Runtime
+        shell: bash
+        run: |
+          set -e
+          cd "$PROJECT_DIR"
+
+          RUNTIME="app/libnode/bin/arm64-v8a/libc++_shared.so"
+
+          if [ -f "$RUNTIME" ]; then
+            rm "$RUNTIME"
+            echo "Removed duplicate staged C++ runtime."
+          else
+            echo "No duplicate staged C++ runtime found."
+          fi
 
       - name: Install Node Dependencies
         shell: bash
         run: |
+          set -e
           cd "$PROJECT_DIR"
+
           bash scripts/setup-node-deps.sh
 
       - name: Validate JavaScript
         shell: bash
         run: |
+          set -e
           cd "$PROJECT_DIR"
+
           node --check app/src/main/assets/nodejs-project/server.js
           node --check app/src/main/assets/nodejs-project/bootstrap.js
 
-      - name: Verify ARM64 Runtime
+          echo "JavaScript validation successful."
+
+      - name: Verify Native Runtime
         shell: bash
         run: |
           set -e
@@ -162,16 +187,37 @@ jobs:
 
           readelf -h app/libnode/bin/arm64-v8a/libnode.so | grep "AArch64"
 
+          echo "ARM64 Node.js runtime verified."
+
       - name: Build ARM64 APK
         shell: bash
         run: |
+          set -e
           cd "$PROJECT_DIR"
+
           gradle --no-daemon --stacktrace assembleDebug
 
-      - name: Upload APK
+          echo "APK build completed."
+
+      - name: Verify APK
+        shell: bash
+        run: |
+          set -e
+
+          APK="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
+
+          if [ ! -s "$APK" ]; then
+            echo "ERROR: APK was not generated."
+            exit 1
+          fi
+
+          echo "APK generated successfully."
+          ls -lh "$APK"
+
+      - name: Upload ARM64 APK
         uses: actions/upload-artifact@v4
         with:
           name: Country-Battle-ARM64-APK
-          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 14
