@@ -10,22 +10,33 @@ on:
 permissions:
   contents: read
 
+env:
+  NODE_MOBILE_VERSION: "18.20.4"
+  ANDROID_NDK_VERSION: "27.2.12479018"
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Find and Extract ZIP
+      - name: Install Build Utilities
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unzip jq binutils
+
+      - name: Extract Project ZIP
         shell: bash
         run: |
           set -e
+
           ZIP_FILE=$(find . -maxdepth 1 -type f -iname "*.zip" | head -n 1)
 
           if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: No ZIP file found in repository root."
+            echo "ERROR: Project ZIP not found."
             exit 1
           fi
 
@@ -39,8 +50,10 @@ jobs:
             exit 1
           fi
 
-          PROJECT_DIR=$(dirname "$SETTINGS_FILE")
+          PROJECT_DIR="$(cd "$(dirname "$SETTINGS_FILE")" && pwd)"
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          echo "Project found: $PROJECT_DIR"
 
       - name: Check Project Files
         shell: bash
@@ -49,15 +62,17 @@ jobs:
           cd "$PROJECT_DIR"
 
           REQUIRED_FILES=(
+            "settings.gradle"
+            "build.gradle"
             "app/build.gradle"
+            "app/CMakeLists.txt"
             "scripts/setup-node-mobile.sh"
             "scripts/setup-node-deps.sh"
+            "app/src/main/assets/nodejs-project/package.json"
             "app/src/main/assets/nodejs-project/package-lock.json"
             "app/src/main/assets/nodejs-project/bootstrap.js"
-            "server.js"
-            "game/index.html"
-            "app/libnode/bin/arm64-v8a/libnode.so"
-            "app/libnode/include/node/node.h"
+            "app/src/main/assets/nodejs-project/server.js"
+            "app/src/main/assets/nodejs-project/game/index.html"
           )
 
           for FILE in "${REQUIRED_FILES[@]}"; do
@@ -66,6 +81,8 @@ jobs:
               exit 1
             fi
           done
+
+          echo "All source files found."
 
       - name: Set Up Java
         uses: actions/setup-java@v4
@@ -76,9 +93,15 @@ jobs:
       - name: Set Up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Set Up Android NDK
+      - name: Install Android SDK, NDK and CMake
         run: |
-          sdkmanager "ndk;27.2.12479018"
+          sdkmanager \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "ndk;${ANDROID_NDK_VERSION}" \
+            "cmake;3.22.1"
+
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION" >> "$GITHUB_ENV"
 
       - name: Set Up Node.js
         uses: actions/setup-node@v4
@@ -90,37 +113,47 @@ jobs:
         with:
           gradle-version: "8.9"
 
-      - name: Install Node Runtime
+      - name: Download ARM64 Node.js Mobile Runtime
         shell: bash
         run: |
           cd "$PROJECT_DIR"
-          chmod +x scripts/setup-node-mobile.sh
           bash scripts/setup-node-mobile.sh
 
       - name: Install Node Dependencies
         shell: bash
         run: |
           cd "$PROJECT_DIR"
-          chmod +x scripts/setup-node-deps.sh
           bash scripts/setup-node-deps.sh
 
       - name: Validate JavaScript
         shell: bash
         run: |
           cd "$PROJECT_DIR"
-          node --check server.js
+
+          node --check app/src/main/assets/nodejs-project/server.js
           node --check app/src/main/assets/nodejs-project/bootstrap.js
+
+      - name: Check ARM64 Runtime
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+
+          test -s app/libnode/bin/arm64-v8a/libnode.so
+          test -s app/libnode/include/node/node.h
+
+          readelf -h app/libnode/bin/arm64-v8a/libnode.so \
+            | grep -E 'Machine:.*AArch64'
 
       - name: Build ARM64 APK
         shell: bash
         run: |
           cd "$PROJECT_DIR"
-          gradle assembleDebug
+          gradle --no-daemon --stacktrace assembleDebug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: Country-Battle-ARM64-APK
-          path: |
-            ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+          retention-days: 14
