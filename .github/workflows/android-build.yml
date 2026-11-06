@@ -1,0 +1,126 @@
+name: Country Battle Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "*.zip"
+      - ".github/workflows/android-build.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Find and Extract ZIP
+        shell: bash
+        run: |
+          set -e
+          ZIP_FILE=$(find . -maxdepth 1 -type f -iname "*.zip" | head -n 1)
+
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ERROR: No ZIP file found in repository root."
+            exit 1
+          fi
+
+          mkdir -p _country_battle_source
+          unzip -q "$ZIP_FILE" -d _country_battle_source
+
+          SETTINGS_FILE=$(find _country_battle_source -name settings.gradle -type f | head -n 1)
+
+          if [ -z "$SETTINGS_FILE" ]; then
+            echo "ERROR: settings.gradle not found."
+            exit 1
+          fi
+
+          PROJECT_DIR=$(dirname "$SETTINGS_FILE")
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+      - name: Check Project Files
+        shell: bash
+        run: |
+          set -e
+          cd "$PROJECT_DIR"
+
+          REQUIRED_FILES=(
+            "app/build.gradle"
+            "scripts/setup-node-mobile.sh"
+            "scripts/setup-node-deps.sh"
+            "app/src/main/assets/nodejs-project/package-lock.json"
+            "app/src/main/assets/nodejs-project/bootstrap.js"
+            "server.js"
+            "game/index.html"
+            "app/libnode/bin/arm64-v8a/libnode.so"
+            "app/libnode/include/node/node.h"
+          )
+
+          for FILE in "${REQUIRED_FILES[@]}"; do
+            if [ ! -f "$FILE" ]; then
+              echo "ERROR: Missing file: $FILE"
+              exit 1
+            fi
+          done
+
+      - name: Set Up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set Up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set Up Android NDK
+        run: |
+          sdkmanager "ndk;27.2.12479018"
+
+      - name: Set Up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Set Up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Install Node Runtime
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+          chmod +x scripts/setup-node-mobile.sh
+          bash scripts/setup-node-mobile.sh
+
+      - name: Install Node Dependencies
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+          chmod +x scripts/setup-node-deps.sh
+          bash scripts/setup-node-deps.sh
+
+      - name: Validate JavaScript
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+          node --check server.js
+          node --check app/src/main/assets/nodejs-project/bootstrap.js
+
+      - name: Build ARM64 APK
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+          gradle assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Country-Battle-ARM64-APK
+          path: |
+            ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
